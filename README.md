@@ -3,7 +3,7 @@ This files provide the analysis code and results presented in the article entitl
 (https://doi.org/10.3390/ijerph19031139)
 
 There are two files:
-  File1 - code analysis during pre-vaccination period
+  File1 - code analysis during pre-vaccination period; 
   File2 - code analysis during post-vaccination period
 
 Abstract
