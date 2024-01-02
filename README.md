@@ -9,7 +9,7 @@ To regenerate the code and run the analysis, follow these steps:
 
 1. Download the R project file named **December_analysis.Rproj**.
 2. Open the R project file using your preferred R development environment.
-3. Navigate to the different R markdown files to execute specific parts of the code.
+3. Navigate to the different R markdown files to execute specific parts of the code. (eg. [pre_vac] analysis_Huy_Dec_10.Rmd, [post_vac] preprocessing_Huy_Dec_10.Rmd, ...)
 
 ## Folder Structure
 
