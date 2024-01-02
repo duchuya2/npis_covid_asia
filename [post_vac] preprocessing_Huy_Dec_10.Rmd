@@ -1,0 +1,87 @@
+---
+title: "[post_vaccination] prepocessing"
+author: "Le Duc Huy"
+date: "10/12/2021"
+output: html_document
+---
+```{r import package}
+
+library(pacman)
+p_load(lme4,lmerTest ,performance, tidyverse,lubridate, lattice, devtools, VGAM, ggpubr, plotly, knitr)
+
+```
+
+```{r vaccine data}
+rm(list = ls())
+
+postvac_df <- import(here("dataset","data2021.RData"))
+
+# check missing data
+postvac_df %>% select(iso_code) %>% summarise(count=n()) %>% View()
+postvac_df %>% filter(iso_code=="TLS") %>% View()
+
+# r normalized transformation ~ probit transformation
+postvac_df <- postvac_df %>% filter(week.case.eff != 0) %>% mutate(probit.case = probitlink( week.case.eff))
+
+# Check distribution
+qqnorm(postvac_df$probit.case)
+hist(postvac_df$probit.case)
+boxplot(postvac_df$probit.case)
+```
+
+```{r transform control variables}
+
+postvac_df  <- postvac_df %>% mutate(
+  pop_log = log(population), 
+  pop_denlog = log(pop_density),
+  median_age.log = log(median_age),
+  gdp.log = log(gdp),
+  incomegroup1 = factor(incomegroup, levels = c("Low income", "Lower middle income", "Upper middle income" , "High income")), 
+  incomegroup2 = factor(case_when(
+  incomegroup1 == "Low income" ~ "LMIC",
+  incomegroup1 == "Lower middle income" ~ "LMIC",
+  incomegroup1 == "Upper middle income" ~ "upper_income",
+  incomegroup1 == "High income" ~ "high_income")
+))
+
+postvac_df <- postvac_df %>% 
+  mutate(
+  test.policy.red = factor(case_when(
+  test.policy==0~0,
+  test.policy==1~0,
+  test.policy==2~1, 
+  test.policy==3~2
+)), 
+  inter.travel.red = factor(case_when(
+  inter.travel==0~0,
+  inter.travel==1~0,
+  inter.travel==2~0,
+  inter.travel==3~1,
+  inter.travel==4~2
+)), 
+  wear.mask.red = factor(case_when(
+  wear.mask==0~0,
+  wear.mask==1~1,
+  wear.mask==2~1,
+  wear.mask==3~2,
+  wear.mask==4~3
+)),
+  pp.vac.1 = factor(case_when(
+  pp.vac.100 <1 ~ 0,
+  pp.vac.100 <5 & pp.vac.100 >=1 ~ 1,
+  pp.vac.100 <10 & pp.vac.100 >=5 ~ 2,
+  pp.vac.100 <30 & pp.vac.100 >=10 ~ 3,
+  pp.vac.100 > 30 ~ 4,
+)),
+  ful.100.cate = factor(case_when(
+  ful.vac.100 <=10 & ful.vac.100 >=0 ~ 0, 
+  ful.vac.100 <=30 & ful.vac.100 >10~ 1,
+  ful.vac.100 <100 & ful.vac.100 >30 ~ 2
+)))
+
+
+export(here(postvac_df,here("dataset", "vac_data.RData")))
+
+```
+
+

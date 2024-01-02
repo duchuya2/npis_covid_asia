@@ -1,0 +1,75 @@
+---
+title: "[post_vaccination] prepocessing"
+author: "Le Duc Huy"
+date: "10/12/2021"
+output: html_document
+---
+```{r import package}
+
+pacman::p_load(rio, here, lme4,lmerTest ,performance, tidyverse,lubridate, lattice, devtools, VGAM, ggpubr, plotly, knitr)
+
+```
+
+```{r pre-vaccine data}
+rm(list = ls())
+prevac_df <- import(here("dataset","data2020.RData"))
+
+# check missing data
+prevac_df %>% select(iso_code) %>% summarise(count=n()) %>% View()
+prevac_df %>% filter(iso_code=="TLS") %>% View()
+
+# r normalized transformation ~ probit transformation
+prevac_df <- prevac_df %>% filter(week.case.eff != 0) %>% mutate(probit.case = probitlink( week.case.eff))
+
+# Check distribution
+qqnorm(prevac_df$probit.case)
+hist(prevac_df$probit.case)
+boxplot(prevac_df$probit.case)
+
+```
+
+```{r transform control variables}
+
+prevac_df  <- prevac_df %>% mutate(
+  pop_log = log(population), 
+  pop_denlog = log(pop_density),
+  median_age.log = log(median_age),
+  gdp.log = log(gdp),
+  incomegroup1 = factor(incomegroup, levels = c("Low income", "Lower middle income", "Upper middle income" , "High income")), 
+  incomegroup2 = case_when(
+  incomegroup1 == "Low income" ~ "LMIC",
+  incomegroup1 == "Lower middle income" ~ "LMIC",
+  incomegroup1 == "Upper middle income" ~ "upper_income",
+  incomegroup1 == "High income" ~ "high_income")
+) %>%
+  mutate(incomegroup2 == factor(incomegroup2, levels = c( "LMIC", "upper_income","high_income")))
+
+# Recode health policies
+
+prevac_df <- prevac_df %>% 
+  mutate(
+  test.policy.red = factor(case_when(
+  test.policy==0~0,
+  test.policy==1~0,
+  test.policy==2~1, 
+  test.policy==3~2
+)), 
+  inter.travel.red = factor(case_when(
+  inter.travel==0~0,
+  inter.travel==1~0,
+  inter.travel==2~0,
+  inter.travel==3~1,
+  inter.travel==4~2
+)), 
+  wear.mask.red = factor(case_when(
+  wear.mask==0~0,
+  wear.mask==1~1,
+  wear.mask==2~1,
+  wear.mask==3~2,
+  wear.mask==4~3
+)))
+
+export(prevac_df, here("dataset", "prevac_data.RData"))
+```
+
+

@@ -1,0 +1,482 @@
+---
+title: "[post_vaccination] analysis"
+author: "Le Duc Huy"
+date: "10/12/2021"
+output: html_document
+---
+
+```{r import package and data}
+
+rm(list = ls())
+pacman::p_load(rio,here, lme4,lmerTest ,performance, tidyverse,lubridate, lattice, devtools, VGAM, ggpubr, plotly, knitr)
+
+data0.anal <- import(here("dataset" ,"vac_data.RData"))
+
+```
+
+
+```{r univariate analysis - NPIs}
+
+source("bic_selection.R") #Import the function to extract model fit parameter
+source("fit_lmer.R")
+
+npis <- c(
+  "school.close.red", "work.close.red", "cancel.pubevent.red", 
+  "restric.gather.red", "close.transport.red", "stay.home.red", 
+  "restric.move.red", "inter.travel", "test.policy.red", 
+  "contact.tracing", "wear.mask", "info.campaign")
+
+npi_results <- data.frame()
+
+for (predictor in npis) {
+  result <- fit_lmer(predictor, data0.anal)
+  npi_results <- rbind(npi_results, result)
+}
+
+# Univariate analysis - control covariates and vaccine covariates
+
+ctrl_vars <- c("pop_log", "pop_denlog", "median_age", "gdp.log", "test.thousand", "per_urban", "uhc_index", "healthworker_den", "incomegroup2", "sdi_index", "mobi.composite", "pp.vac.100", "ful.vac.100")
+
+ctrl_results <- data.frame()
+
+for (predictor in ctrl_vars) {
+  result <- fit_lmer(predictor, data0.anal)
+  ctrl_results <- rbind(ctrl_results, result)
+}
+
+```
+
+```{r Analyse significant covariate}
+source("sumfit_lmer.R")
+
+sig_covariates <- c("school.close.red","close.transport.red", "restric.gather.red", "pop_denlog", "pp.vac.100", "ful.vac.100")
+
+sig.covariate <- data.frame()
+
+for (predictor in sig_covariates) {
+  result <- sumfit_lmer(predictor, data0.anal)
+  sig.covariate <- rbind(sig.covariate, result)
+}
+
+bic.covariates <- data.frame()
+
+for (predictor in sig_covariates) {
+  result <- fit_lmer(predictor, data0.anal)
+  bic.covariates <- rbind(bic.covariates, result)
+}
+
+write.table(sig.covariate, file = './results/[post_vac]sig_covar.csv', row.names = T, sep = ",")
+write.table(bic.covariates, file = './results/[post_vac]bic_covar.csv', row.names = F, sep = ",")
+
+```
+
+```{r linear mixed effect model}
+
+model.mul <- lmer(probit.case ~   pp.vac.100+  school.close.red + pop_denlog + restric.gather.red + close.transport.red +
+                    time  +  (time|iso_code),
+                     data= data0.anal, REML = F, lmerControl(optimizer = "bobyqa") )
+
+
+#performance(model.mul)
+
+postvac_lme <- as.data.frame(summary(model.mul)[["coefficients"]])
+
+export(postvac_lme, here("results","lme_result.xlsx"))
+```
+
+```{r Evaluate the good of fitness of model}
+#devtools::install_github("goodekat/redres")
+library(redres)
+
+data0.anal1 <- data0.anal %>%  filter( is.na(pp.vac.100) ==F) %>% filter(is.na(close.transport.red) == F) %>% filter(is.na(school.close.red) == F) %>%    filter(is.na(restric.gather.red) == F)  %>% 
+  mutate(pop_denlog = log(pop_density))
+ 
+rc_resids <- compute_redres(model.mul)
+pm_resids <- compute_redres(model.mul, type = "pearson_mar")
+sc_resids <- compute_redres(model.mul, type = "std_cond")
+resids <- data.frame(data0.anal1$iso_code, rc_resids, pm_resids, sc_resids)
+plot_redres(model.mul, type = "std_cond")
+plot_resqq(model.mul)
+plot_ranef(model.mul)
+plot(data0.anal1$time, rc_resids,ylim=c(-3,3))
+abline(h=0, col="blue")
+plot(data0.anal1$iso_code, sc_resids)
+abline(h=c(0,2.96,-2.96), col="blue")
+
+# # run other diagnosis
+# p_load(patchwork, randomForest)
+# 
+ #check_model(model.mul) 
+# 
+ plot(check_distribution(model.mul))
+# 
+ vif <- as.data.frame(check_collinearity(model.mul))
+ setwd(result_dec)
+ write.table(vif, '[post_vac] vif_dec10.csv', sep = ",")
+# 
+# pp_check(model.mul, 250)
+
+``` 
+
+```{r glmm model}
+library(glmmTMB)
+model.glm <- glmmTMB(week.case.eff ~ close.transport.red + pp.vac.100 + school.close.red + pop_denlog + restric.gather.red +
+                       time + (time|iso_code), data = data0.anal, family = beta_family(link="probit"), REML = TRUE)
+
+glm.sum <- summary(model.glm)
+
+postvac_glm <- as.data.frame(glm.sum[["coefficients"]]$cond)
+
+```
+
+
+```{r plot of predicted versus observed values }
+p_load(plotly, modelbased)
+install.packages("modelbased")
+library(modelbased)
+install.packages("insight", version = "0.19.7")
+data0.anal1$Predicted <- estimate_response(model.glm)$Predicted
+
+plot2 <- data0.anal1 %>%
+ggplot() +
+geom_line(aes(x = log(week.case.eff), y = log(week.case.eff)), linetype = "dashed") +
+geom_point(aes(x = log(week.case.eff) , y = log(Predicted), key=iso_code), color = "red") +
+ylab("wADGR (predicted)") + xlab("wADGR (observed)")
+
+plot2
+
+
+ggplotly(plot2, source = "select", tooltip = c("key") )
+
+pp_check(model.glm, 1000)
+```
+
+```{r Calculating the marginal effects }
+
+# Develop function marginal 
+amex<- function(ame){
+  x1 <- data.frame(list("AME" = ame*100, "factors" = as.character(substitute(ame))))
+}
+summary(model.glm)
+
+coef_model <- summary(model.glm)$coefficients$cond[,1][-1]
+
+coef <- as.data.frame(coef_model)
+
+# AME time
+AME.time <- coef_model[12] * mean(dnorm(predict(model.glm, type="link")))
+z12 <- amex(AME.time)
+
+
+# pop.density 
+AME.popden<- coef_model[8]* mean(dnorm(predict(model.glm, type="link")))
+z8 <- amex(AME.popden)
+
+
+# vac
+vac0 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,  
+"pp.vac.100"="0",
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+vac1 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,  
+"pp.vac.100"="1",
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+vac2 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,  
+"pp.vac.100"="2",
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+vac3 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,  
+"pp.vac.100"="3",
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+vac4 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,  
+"pp.vac.100"="4",
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+vac10<- vac1 - vac0
+vac20<-vac2-vac0
+vac30<-vac3-vac0
+vac40<-vac4-vac0
+
+AME.vac10 <- mean(vac10)
+AME.vac20<-mean(vac20)
+AME.vac30<-mean(vac30)
+AME.vac40<-mean(vac40)
+
+z2<-amex(AME.vac10)
+z3<-amex(AME.vac20)
+z4<-amex(AME.vac30)
+z5<-amex(AME.vac40)
+# 
+# AME.vac <- coef_model[2]* mean(dnorm(predict(model.glm, type="link")))
+# z2 <- amex(AME.vac)
+
+# transport
+
+trs0 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"="0",  
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+trs1 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"="1",  
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+trs10 <- trs1 - trs0
+AME.trs10 <- mean(trs10)
+z1 <- amex(AME.trs10)
+
+#school close
+sch0 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,  
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"="0", 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+sch2 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"="2", 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+sch3 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"="3", 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= data0.anal1$restric.gather.red,  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+sch20 <- sch2 - sch0
+sch30 <- sch3 - sch0 
+AME.sch20 <- mean(sch20)
+AME.sch30 <- mean(sch30)
+z6 <- amex(AME.sch20)
+z7 <- amex(AME.sch30)
+
+# restrict gather
+gather0 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= "0",  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+gather1 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= "1",  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+gather3 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= "3",  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+gather4 <- predict(model.glm, newdata=data.frame(list(
+"close.transport.red"=data0.anal1$close.transport.red,
+"pp.vac.100"=data0.anal1$pp.vac.100,
+"school.close.red"=data0.anal1$school.close.red, 
+"pop_denlog"=data0.anal1$pop_denlog,  
+"restric.gather.red"= "4",  
+"test.policy"=data0.anal1$test.policy,  
+"time"=data0.anal1$time,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+gather10 <- gather1 - gather0 
+gather30 <- gather3 - gather0
+gather40 <- gather4 - gather0
+
+AME.gather10 <- mean(gather10)
+AME.gather30 <- mean(gather30)
+AME.gather40 <- mean(gather40)
+
+z9  <- amex(AME.gather10)
+z10 <- amex(AME.gather30)
+z11 <- amex(AME.gather40)
+
+# Test policy 
+
+# test0 <- predict(model.glm, newdata=data.frame(list(
+# "close.transport.red"=data0.anal1$close.transport.red,
+# "pp.vac.100"=data0.anal1$pp.vac.100,
+# "school.close.red"=data0.anal1$school.close.red, 
+# "pop_denlog"=data0.anal1$pop_denlog,  
+# "restric.gather.red"= data0.anal1$restric.gather.red,  
+# "test.policy"="0",  
+# "time"=data0.anal1$time,
+# "iso_code"=data0.anal1$iso_code) ), type = "response")
+# test1 <- predict(model.glm, newdata=data.frame(list(
+# "close.transport.red"=data0.anal1$close.transport.red,
+# "pp.vac.100"=data0.anal1$pp.vac.100,
+# "school.close.red"=data0.anal1$school.close.red, 
+# "pop_denlog"=data0.anal1$pop_denlog,  
+# "restric.gather.red"= data0.anal1$restric.gather.red,  
+# "test.policy"="1",  
+# "time"=data0.anal1$time,
+# "iso_code"=data0.anal1$iso_code) ), type = "response")
+# test2 <- predict(model.glm, newdata=data.frame(list(
+# "close.transport.red"=data0.anal1$close.transport.red,
+# "pp.vac.100"=data0.anal1$pp.vac.100,
+# "school.close.red"=data0.anal1$school.close.red, 
+# "pop_denlog"=data0.anal1$pop_denlog,  
+# "restric.gather.red"= data0.anal1$restric.gather.red,  
+# "test.policy"="2",  
+# "time"=data0.anal1$time,
+# "iso_code"=data0.anal1$iso_code) ), type = "response")
+# test3 <- predict(model.glm, newdata=data.frame(list(
+# "close.transport.red"=data0.anal1$close.transport.red,
+# "pp.vac.100"=data0.anal1$pp.vac.100,
+# "school.close.red"=data0.anal1$school.close.red, 
+# "pop_denlog"=data0.anal1$pop_denlog,  
+# "restric.gather.red"= data0.anal1$restric.gather.red,  
+# "test.policy"="3",  
+# "time"=data0.anal1$time,
+# "iso_code"=data0.anal1$iso_code) ), type = "response")
+# 
+# test10 <- test1- test0
+# test20 <- test2-test0
+# test30 <- test3-test0
+# 
+# AME.test10 <- mean(test10)
+# AME.test20 <-mean(test20)
+# AME.test30 <-mean(test30)
+# 
+# z12 <- amex(AME.test10)
+# z13 <- amex(AME.test20)
+# z14 <- amex(AME.test30)
+
+z_merge <- rbind(z1,z2,z3,z4,z5,z6,z7,z8,z9,z10,z11,z12)
+
+term3 <- c(
+"Closing public transport", 
+"1-<5%",
+"5-<10%",
+"10-<30%",
+"Vaccine coverage\n>=30%",
+"School close at some levels",
+"School close at all levels",
+"Log of population density",
+"Restrictions on gathering\n100-<1000",
+"Restrictions on gathering\n10-<100",
+"Restrictions on gathering\n<10",
+"Time\n"
+  )
+
+
+p_load(broom.mixed)
+sum_table <- tidy(model.mul, conf.int = T) 
+# create new table summary of model
+new_table <- sum_table[2:13,]
+ 
+new_table1 <- cbind(new_table, term3, z_merge)
+
+new_table2 <- new_table1 %>% select(term, term3, AME, estimate, conf.low, conf.high)
+
+new_table2$term3 <- factor(new_table2$term3, levels = new_table2$term3)
+
+
+```
+
+
+```{r plot}
+
+p.vac.period<- ggplot(new_table2, aes(x = term3, y = estimate,
+                     ymin = conf.low, ymax = conf.high)) +
+    geom_hline( yintercept = 0, color = 'Black' ) + ylim(-0.6,0.6) + 
+    geom_linerange(size =1, color = 'steelblue') + geom_point(size=1.5, color ='steelblue') + coord_flip() + 
+  ylab("Coefficient Estimates (95%CI)") + 
+  xlab("Predictors") +
+  theme_minimal() + 
+  theme(strip.background = element_rect(NA), 
+  axis.text = element_text(size = 20),
+  axis.title = element_text(size = 20),
+  legend.text = element_text(size = 10),
+  legend.title = element_text(size = 10),
+  strip.text = element_text(size = 8),
+  legend.position = "top")
+p.vac.period
+
+ame.plot <- ggplot(data = new_table2, aes(x= term3, y = AME)) + geom_bar(stat="identity",fill="steelblue") + coord_flip() +
+  geom_hline( yintercept = 0, color = 'Black' ) +
+  geom_text(aes(label=round(AME,2)), hjust= 1.05, color="black", size=5)+
+  ylab("Average marginal effect (%)") +
+  ylim(-1,1) +
+  xlab("") +
+  theme_minimal() + 
+  theme(strip.background = element_rect(NA), 
+        axis.text.y=element_blank(),
+  axis.text = element_text(size = 20),
+  axis.title = element_text(size = 20),
+  legend.text = element_text(size = 10),
+  legend.title = element_text(size = 10),
+  strip.text = element_text(size = 8),
+  legend.position = "top")
+ame.plot
+
+cairo_pdf(filename = "./plot/fig3_NPI_VAC_Dec10.pdf",
+          width = 20, height = 10, #inch
+          onefile = TRUE, family = "Segoe UI")
+merge_bar <- ggarrange(p.vac.period, ame.plot, ncol = 2, nrow = 1, widths = c(1.5,1))
+merge_bar
+dev.off()
+```
+
+

@@ -1,0 +1,348 @@
+---
+title: "[post_vaccination] analysis"
+author: "Le Duc Huy"
+date: "10/12/2021"
+output: html_document
+---
+
+```{r import package}
+
+library(pacman)
+p_load(lme4,lmerTest ,performance, tidyverse,lubridate, lattice, devtools, VGAM, ggpubr, plotly, knitr)
+
+```
+
+```{r pre vaccination data}
+rm(list = ls())
+pacman::p_load(rio,here, lme4,lmerTest ,performance, tidyverse,lubridate, lattice, devtools, VGAM, ggpubr, plotly, knitr)
+
+data0.anal <- import(here("dataset" ,"prevac_data.RData"))
+
+```
+
+```{r univariate analysis - NPIs}
+
+source("bic_selection.R") #Import the function to extract model fit parameter
+source("fit_lmer.R")
+
+npis <- c(
+  "school.close.red", "work.close.red", "cancel.pubevent.red", 
+  "restric.gather.red", "close.transport.red", "stay.home.red", 
+  "restric.move.red", "inter.travel", "test.policy.red", 
+  "contact.tracing", "wear.mask", "info.campaign")
+
+npi_results <- data.frame()
+
+for (predictor in npis) {
+  result <- fit_lmer(predictor, data0.anal)
+  npi_results <- rbind(npi_results, result)
+}
+
+# Univariate analysis - control covariates and vaccine covariates
+
+ctrl_vars <- c("pop_log", "pop_denlog", "median_age", "gdp.log", "test.thousand", "per_urban", "uhc_index", "healthworker_den", "incomegroup2", "sdi_index", "mobi.composite")
+
+ctrl_results <- data.frame()
+
+for (predictor in ctrl_vars) {
+  result <- fit_lmer(predictor, data0.anal)
+  ctrl_results <- rbind(ctrl_results, result)
+}
+
+```
+
+```{r Analyse significant covariate}
+source("sumfit_lmer.R")
+
+sig_covariates <- c("school.close.red", "work.close.red", "cancel.pubevent.red", 
+  "restric.gather.red",  "stay.home.red", "restric.move.red", "inter.travel", "test.policy.red", "contact.tracing", "wear.mask", "median_age", "uhc_index", "incomegroup2")
+
+sig.covariate <- data.frame()
+
+for (predictor in sig_covariates) {
+  result <- sumfit_lmer(predictor, data0.anal)
+  sig.covariate <- rbind(sig.covariate, result)
+}
+
+bic.covariates <- data.frame()
+
+for (predictor in sig_covariates) {
+  result <- fit_lmer(predictor, data0.anal)
+  bic.covariates <- rbind(bic.covariates, result)
+}
+
+write.table(sig.covariate, file = './results/[pre_vac]sig_covar.csv', row.names = T, sep = ",")
+write.table(bic.covariates, file = './results/[pre_vac]bic_covar.csv', row.names = F, sep = ",")
+
+```
+
+```{r linear mixed effect model}
+model.mul <- lmer(probit.case ~ uhc_index  + inter.travel.red  + wear.mask.red +  test.policy.red  + time  + (time|iso_code),
+                     data= data0.anal, REML = F, lmerControl(optimizer = "bobyqa") )
+
+#performance(model.mul)
+
+prevac_lme <- as.data.frame(summary(model.mul)[["coefficients"]])
+
+
+write.table(prevac_lme, file ="./results/[pre_vac]lme result_Dec 13.csv", sep = ",")
+```
+
+```{r Evaluate the good of fitness of model}
+#devtools::install_github("goodekat/redres")
+library(redres)
+
+data0.anal1 <- data0.anal %>%  filter( is.na(uhc_index) ==F)
+
+rc_resids <- compute_redres(model.mul)
+pm_resids <- compute_redres(model.mul, type = "pearson_mar")
+sc_resids <- compute_redres(model.mul, type = "std_cond")
+resids <- data.frame(data0.anal1$iso_code, rc_resids, pm_resids, sc_resids)
+plot_redres(model.mul, type = "std_cond")
+plot_resqq(model.mul)
+plot_ranef(model.mul)
+plot(data0.anal1$time, rc_resids,ylim=c(-3,3))
+abline(h=0, col="blue")
+plot(data0.anal1$iso_code, sc_resids)
+abline(h=c(0,2.96,-2.96), col="blue")
+
+# # run other diagnosis
+# p_load(patchwork, randomForest)
+# 
+ #check_model(model.mul) 
+# 
+ plot(check_distribution(model.mul))
+# 
+ check_collinearity(model.mul)
+# 
+ pp_check(model.mul, 250)
+
+``` 
+
+```{r glmm model}
+library(glmmTMB)
+
+model.glm <- glmmTMB(week.case.eff ~ uhc_index  + inter.travel.red  + wear.mask.red +  test.policy.red + 
+                       time + (time|iso_code), data = data0.anal, family = beta_family(link="probit"), REML = TRUE)
+
+glm.sum <- summary(model.glm)
+
+prevac_glm <- as.data.frame(glm.sum[["coefficients"]]$cond)
+
+
+setwd(result_dec)
+write.table(prevac_glm, file ="./results/[pre_vac]GLM_result_Dec 13.csv", sep = ",")
+```
+
+
+```{r plot of predicted versus observed values }
+p_load(plotly, modelbased)
+
+data0.anal1$Predicted <- estimate_response(model.glm)$Predicted
+
+plot2 <- data0.anal1 %>%
+ggplot() +
+geom_line(aes(x = log(week.case.eff), y = log(week.case.eff)), linetype = "dashed") +
+geom_point(aes(x = log(week.case.eff) , y = log(Predicted), key=iso_code), color = "red") +
+ylab("wADGR (predicted)") + xlab("wADGR (observed)")
+
+plot2
+
+
+ggplotly(plot2, source = "select", tooltip = c("key") )
+
+pp_check(model.glm, 1000)
+```
+
+```{r Calculating the marginal effects }
+# Develop function marginal 
+amex<- function(ame){
+  x1 <- data.frame(list("AME" = ame*100, "factors" = as.character(substitute(ame))))
+}
+summary(model.glm)
+
+coef_model <- summary(model.glm)$coefficients$cond[,1][-1]
+
+coef <- as.data.frame(coef_model)
+
+# AME time
+AME.time <- coef_model[9] * mean(dnorm(predict(model.glm, type="link")))
+z9 <- amex(AME.time)
+
+# uhc index
+AME.uhc_idx <- coef_model[1]* mean(dnorm(predict(model.glm, type="link")))
+z1 <- amex(AME.uhc_idx)
+
+# travel
+trv0 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"="0",
+"wear.mask.red"=data0.anal1$wear.mask.red, 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+trv1 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"="1",
+"wear.mask.red"=data0.anal1$wear.mask.red, 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+trv2 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"="2",
+"wear.mask.red"=data0.anal1$wear.mask.red, 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+trv10 <- trv1 - trv0 
+trv20 <- trv2 - trv0 
+
+
+AME.trv10<-mean(trv10)
+AME.trv20<-mean(trv20)
+
+z2<-amex(AME.trv10)
+z3<-amex(AME.trv20)
+
+
+#wear.mask.red 
+mask0 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"="0", 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+mask1 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"="1", 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+mask2 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"="2", 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+mask3 <- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"="3", 
+"test.policy.red"=data0.anal1$test.policy.red,
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+mask10<-mask1-mask0
+mask20<-mask2-mask0
+mask30<-mask3-mask0
+
+AME.mask10<-mean(mask10)
+AME.mask20<-mean(mask20)
+AME.mask30<-mean(mask30)
+
+
+z4<-amex(AME.mask10)
+z5<-amex(AME.mask20)
+z6<-amex(AME.mask30)
+
+# test 
+test0<- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"=data0.anal1$wear.mask.red, 
+"test.policy.red"="0",
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+test1<- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"=data0.anal1$wear.mask.red, 
+"test.policy.red"="1",
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+test2<- predict(model.glm, newdata=data.frame(list("time"=data0.anal1$time,
+"uhc_index"=data0.anal1$uhc_index,
+"inter.travel.red"=data0.anal1$inter.travel.red,
+"wear.mask.red"=data0.anal1$wear.mask.red, 
+"test.policy.red"="2",
+"iso_code"=data0.anal1$iso_code) ), type = "response")
+
+
+test10<-test1-test0
+test20<-test2-test0
+
+
+AME.test10<-mean(test10)
+AME.test20<-mean(test20)
+
+
+z7<-amex(AME.test10)
+z8<-amex(AME.test20)
+
+
+z_merge <- rbind(z1,z2,z3,z4,z5,z6,z7,z8,z9)
+
+term3 <- c(
+"UHC Index\n",
+"Ban arrivals from\nsome regions\n",
+"Ban on all regions\n",
+'Recommend or Required wear\nmask in some public spaces',
+'Required wear mask in all\n public spaces with \nother people present',
+'Required wear mask outside\n the home at all times',
+"Testing of anyone \nshowing symptoms\n",
+"Open public testing\n",
+"Time\n"
+  )
+p_load(broom.mixed)
+sum_table <- tidy(model.mul, conf.int = T)
+
+# create new table summary of model
+new_table <- sum_table[2:10,]
+ 
+new_table1 <- cbind(new_table, term3, z_merge)
+
+new_table2 <- new_table1 %>% select(term, term3, AME, estimate, conf.low, conf.high)
+
+new_table2$term3 <- factor(new_table2$term3, levels = new_table2$term3)
+
+
+prevac_period<- ggplot(new_table2, aes(x = term3, y = estimate,
+                     ymin = conf.low, ymax = conf.high)) +
+    geom_hline( yintercept = 0, color = 'Black' ) + ylim(-0.5,0.5) + 
+    geom_linerange(size =1, color = 'steelblue') + geom_point(size=1.5, color ='steelblue') + coord_flip() + 
+  ylab("Coefficient Estimates (95%CI)") + 
+  xlab("Predictors") +
+  theme_minimal() + 
+  theme(strip.background = element_rect(NA), 
+  axis.text = element_text(size = 20),
+  axis.title = element_text(size = 20),
+  legend.text = element_text(size = 10),
+  legend.title = element_text(size = 10),
+  strip.text = element_text(size = 8),
+  legend.position = "top")
+prevac_period
+
+
+
+ame.plot <- ggplot(data = new_table2, aes(x= term3, y = AME)) + geom_bar(stat="identity",fill="steelblue") + coord_flip() +
+  geom_hline( yintercept = 0, color = 'Black' ) +
+  geom_text(aes(label=round(AME,2)), hjust= 1.05, color="black", size=5)+
+  ylab("Average marginal effect (%)") +
+  ylim(-3,3) +
+  xlab("") +
+  theme_minimal() + 
+  theme(strip.background = element_rect(NA), 
+        axis.text.y=element_blank(),
+  axis.text = element_text(size = 20),
+  axis.title = element_text(size = 20),
+  legend.text = element_text(size = 10),
+  legend.title = element_text(size = 10),
+  strip.text = element_text(size = 8),
+  legend.position = "top")
+ame.plot
+
+cairo_pdf(filename = "./plot/fig3_NPI_Dec10.pdf",
+          width = 20, height = 10, #inch
+          onefile = TRUE, family = "Segoe UI")
+merge_bar <- ggarrange(prevac_period, ame.plot, ncol = 2, nrow = 1, widths = c(1.5,1))
+merge_bar
+dev.off()
+```
+

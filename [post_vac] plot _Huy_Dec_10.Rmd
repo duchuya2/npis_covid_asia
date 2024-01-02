@@ -1,0 +1,66 @@
+---
+title: '[post-vaccination] plot'
+author: "Huy"
+date: "10/12/2021"
+output: html_document
+---
+
+```{r import package}
+
+library(pacman)
+p_load(lme4,lmerTest ,performance, tidyverse,lubridate, lattice, devtools, VGAM, ggpubr, plotly, knitr)
+
+```
+
+
+```{r vaccine data}
+rm(list = ls())
+data0.anal = import(here("dataset","data2021.plot.RData"))
+
+```
+
+```{r plot group trajectory}
+check.time <- data0.anal %>% select(id, week.case.eff, growth.rate.manual, timeStart, time)
+
+ # Group plot
+plot.group.case <- ggplot(data0.anal, aes(time+2, week.case.eff)) +
+  stat_smooth(method = "loess", se = F, size = 2) +
+  stat_summary(aes(col = country), fun.y = mean, geom = "line", alpha = 0.5) +
+  xlab("Two-week lag after vaccination") +
+  ylab("Average daily growth rate (wADGR) ")+ 
+  theme_bw() + 
+  theme(strip.background = element_blank()) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(legend.position = "bottom") + 
+  scale_x_continuous(breaks = seq(2, 25, by = 1))
+plot.group.case
+
+plot.group.string <- ggplot(data0.anal, aes(time, string.idx)) +
+  stat_smooth(method = "loess", se = F, size = 2) +
+  stat_summary(aes(col = country), fun.y = mean, geom = "line", alpha = 0.5) +
+  xlab("Week of vaccination") +
+  ylab(" Stringency index")+ 
+  theme_bw() + 
+  theme(strip.background = element_blank()) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0, 23, by = 1))
+plot.group.string 
+
+
+cairo_pdf(filename = "./plot/fig4_NPI_vac.period_Dec10.pdf",
+          width = 10, height = 16, #inch
+          onefile = TRUE, family = "Segoe UI")
+
+merge1 <- ggarrange(plot.group.string, plot.group.case, hjust = -1,
+          ncol = 1, nrow = 2)
+
+merge1
+
+dev.off()
+
+ggplotly(plot.group.case)
+ggplotly(plot.group.string)
+
+
+```
